@@ -93,6 +93,24 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string> {
 export async function extractFileText(file: File): Promise<string> {
   const name = file.name.toLowerCase();
 
+  // Photograph or scan of a legal document.
+  if (
+    file.type.startsWith("image/") ||
+    /\.(png|jpe?g|webp|tiff?)$/.test(name)
+  ) {
+    const { createWorker } = await import("tesseract.js");
+    const worker = await createWorker("eng");
+    try {
+      const result = await worker.recognize(file);
+      if (!result.data.text.trim()) {
+        throw new Error("No readable text was found in that image. Try a sharper, well-lit photo.");
+      }
+      return result.data.text;
+    } finally {
+      await worker.terminate();
+    }
+  }
+
   // Plain text and Markdown files.
   if (
     name.endsWith(".txt") ||
@@ -124,7 +142,5 @@ export async function extractFileText(file: File): Promise<string> {
     return extractPdfText(buf);
   }
 
-  throw new Error(
-    "Use a PDF, DOCX, or TXT file, or paste the contract text.",
-  );
+  throw new Error("Use a PDF, DOCX, TXT, or image file (JPG, PNG, or WebP), or paste the legal text.");
 }

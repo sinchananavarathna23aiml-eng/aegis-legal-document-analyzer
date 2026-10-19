@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { authMiddleware } from "@/lib/auth/middleware";
 
 const SYSTEM = `You are a precise legal document assistant for Aegis, a contract analysis platform.
 Answer only from the provided document. If the document does not contain the answer, say so.
@@ -52,6 +53,7 @@ async function chatGroq(
 
 export const askDocument = createServerFn({ method: "POST" })
   .validator((input: { question: string; documentText: string }) => input)
+  .middleware([authMiddleware])
   .handler(async ({ data }) => {
     const question = data.question.trim();
     if (!question) return { ok: false as const, error: "Enter a question." };
@@ -67,6 +69,7 @@ export const askDocument = createServerFn({ method: "POST" })
 
 export const refineSummary = createServerFn({ method: "POST" })
   .validator((input: { documentText: string }) => input)
+  .middleware([authMiddleware])
   .handler(async ({ data }) => {
     const doc = data.documentText.slice(0, 12000);
     return chatGroq([
@@ -104,6 +107,7 @@ legal advice; do not invent facts not in the excerpt.`;
 
 export const reviewClauseCandidates = createServerFn({ method: "POST" })
   .validator((input: { candidates: RiskCandidate[] }) => input)
+  .middleware([authMiddleware])
   .handler(async ({ data }) => {
     const candidates = data.candidates.slice(0, 40);
     if (!candidates.length) return { ok: false as const, error: "Nothing to review." };
@@ -194,6 +198,7 @@ empty array. This is not legal advice; do not invent clauses not present in the 
 
 export const discoverAdditionalFindings = createServerFn({ method: "POST" })
   .validator((input: { documentText: string }) => input)
+  .middleware([authMiddleware])
   .handler(async ({ data }) => {
     const doc = data.documentText.slice(0, 12000);
     if (!doc.trim()) return { ok: false as const, error: "No document text to scan." };
@@ -258,6 +263,7 @@ export const compareWithAi = createServerFn({ method: "POST" })
   .validator(
     (input: { docA: string; docB: string; fileNameA: string; fileNameB: string }) => input,
   )
+  .middleware([authMiddleware])
   .handler(async ({ data }) => {
     const docA = data.docA.slice(0, 10000);
     const docB = data.docB.slice(0, 10000);
@@ -298,11 +304,56 @@ export const lexaChat = createServerFn({ method: "POST" })
       messages: { role: "user" | "assistant"; content: string }[];
       documentText: string;
       documentName: string;
+      threadId?: string;
     }) => input,
   )
-  .handler(async ({ data }) => {
-    const doc = data.documentText.slice(0, 12000);
-    if (!doc.trim()) {
+  .middleware([authMiddleware])
+  .handler(async ({ data, context }) => {
+    const latest = data.messages.at(-1);
+    if (!latest || latest.role !== "user" || !latest.content.trim()) {
+      return { ok: false as const, error: "Enter a message to continue." };
+    }
+    const [{ getSql }, { randomUUID }] = await Promise.all([
+      import("@/lib/db"),
+      import("node:crypto"),
+    ]);
+    const sql = await getSql();
+    let threadId = data.threadId;
+    let savedMessages: { role: "user" | "assistant"; content: string }[] = [];
+    let docText = data.documentText.slice(0, 100000);
+    let documentName = data.documentName.slice(0, 500);
+
+    if (threadId) {
+      const rows = await sql.query<{
+        document_name: string;
+        document_text: string;
+        messages: { role: "user" | "assistant"; content: string }[];
+      }>(
+        `SELECT document_name, document_text, messages FROM legal_chat_threads
+         WHERE id = $1 AND user_id = $2 LIMIT 1`,
+        [threadId, context.userId],
+      );
+      const thread = rows[0];
+      if (!thread) return { ok: false as const, error: "This conversation is no longer available." };
+      documentName = thread.document_name;
+      docText = thread.document_text.slice(0, 12000);
+      savedMessages = Array.isArray(thread.messages) ? thread.messages : [];
+    } else {
+      threadId = randomUUID();
+      await sql.query(
+        `INSERT INTO legal_chat_threads (id, user_id, document_name, document_text)
+         VALUES ($1, $2, $3, $4)`,
+        [threadId, context.userId, documentName, data.documentText.slice(0, 100000)],
+      );
+    }
+
+    const userMessage = { role: "user" as const, content: latest.content.slice(0, 12000) };
+    await sql.query(
+      `UPDATE legal_chat_threads SET messages = messages || $1::jsonb, updated_at = now()
+       WHERE id = $2 AND user_id = $3`,
+      [JSON.stringify([userMessage]), threadId, context.userId],
+    );
+    if (!docText.trim()) {
       return { ok: false as const, error: "No document loaded. Upload or paste a contract first." };
     }
 
@@ -310,10 +361,23 @@ export const lexaChat = createServerFn({ method: "POST" })
       { role: "system", content: LEXA_SYSTEM },
       {
         role: "system",
-        content: `Document: "${data.documentName}"\n\n${doc}`,
+        content: `Document: "${documentName}"\n\n${docText.slice(0, 12000)}`,
       },
-      ...data.messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+      ...savedMessages.slice(-20).map((message) => ({
+        ...message,
+        content: message.content.slice(0, 4000),
+      })),
+      userMessage,
     ];
 
-    return chatGroq(groqMessages, { temperature: 0.3, maxTokens: 1000 });
+    const response = await chatGroq(groqMessages, { temperature: 0.3, maxTokens: 1000 });
+    if (response.ok) {
+      await sql.query(
+        `UPDATE legal_chat_threads SET messages = messages || $1::jsonb, updated_at = now()
+         WHERE id = $2 AND user_id = $3`,
+        [JSON.stringify([{ role: "assistant", content: response.text }]), threadId, context.userId],
+      );
+      return { ...response, threadId };
+    }
+    return { ...response, threadId };
   });

@@ -2,6 +2,67 @@ import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "./auth/middleware";
 import type { AnalysisResult, ComparisonResult } from "./legal/types";
 
+export type LegalChatMessage = { role: "user" | "assistant"; content: string };
+export type LegalChatThreadSummary = {
+  id: string;
+  documentName: string;
+  preview: string;
+  updatedAt: number;
+};
+export type LegalChatThread = LegalChatThreadSummary & {
+  documentText: string;
+  messages: LegalChatMessage[];
+};
+
+const listChatThreadsFn = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const { getSql } = await import("./db");
+    const sql = await getSql();
+    return sql.query<LegalChatThreadSummary>(
+      `SELECT id, document_name AS "documentName",
+              COALESCE(messages->(jsonb_array_length(messages) - 1)->>'content', '') AS preview,
+              (EXTRACT(EPOCH FROM updated_at) * 1000)::double precision AS "updatedAt"
+       FROM legal_chat_threads WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 100`,
+      [context.userId],
+    );
+  });
+
+const loadChatThreadFn = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((input: { id: string }) => input)
+  .handler(async ({ data, context }) => {
+    const { getSql } = await import("./db");
+    const sql = await getSql();
+    const rows = await sql.query<{
+      id: string;
+      documentName: string;
+      documentText: string;
+      messages: LegalChatMessage[];
+      updatedAt: number;
+    }>(
+      `SELECT id, document_name AS "documentName", document_text AS "documentText", messages,
+              (EXTRACT(EPOCH FROM updated_at) * 1000)::double precision AS "updatedAt"
+       FROM legal_chat_threads WHERE id = $1 AND user_id = $2 LIMIT 1`,
+      [data.id, context.userId],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ...row,
+      preview: row.messages.at(-1)?.content.slice(0, 180) ?? "New conversation",
+      messages: Array.isArray(row.messages) ? row.messages : [],
+    } satisfies LegalChatThread;
+  });
+
+export async function listChatThreads(): Promise<LegalChatThreadSummary[]> {
+  return listChatThreadsFn();
+}
+
+export async function loadChatThread(id: string): Promise<LegalChatThread | null> {
+  return loadChatThreadFn({ data: { id } });
+}
+
 export type SavedAnalysisSummary = {
   id: string;
   fileName: string;

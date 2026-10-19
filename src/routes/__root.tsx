@@ -16,10 +16,10 @@ export const Route = createRootRoute({
         content:
           "A Secure AI-Based Legal Document Retrieval and Analysis Platform. Analyze, compare, and draft contracts with on-device scoring and grounded Q&A.",
       },
-      { name: "theme-color", content: "#0b0c0e" },
+      { name: "theme-color", content: "#f5f5f2" },
     ],
     links: [
-      { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
+      { rel: "icon", type: "image/png", href: "/aegis-logo.png" },
       { rel: "stylesheet", href: appCss },
       { rel: "manifest", href: "/__grok/manifest.webmanifest" },
       { rel: "apple-touch-icon", href: "/__grok/icon-180.png" },

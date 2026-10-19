@@ -8,27 +8,46 @@ import type {
 
 
 const CLAUSE_PATTERNS: Record<string, RegExp> = {
-  confidentiality: /confidential(?:ity)?|non[- ]disclosure|proprietary information|trade secrets|confidential information/gi,
-  indemnification: /indemnif(?:y|ication|ies|ied)|hold harmless|defend and indemnify/gi,
-  liability: /liability|limitation of liability|disclaimer of liability|liable for|damages cap/gi,
-  termination: /terminat(?:e|ion|es|ing)|cancellation|cancel this agreement|early termination/gi,
-  governing_law: /governing law|choice of law|jurisdiction|venue|applicable law/gi,
-  amendment: /amend(?:ment|ments|ed)?|modif(?:y|ication|ications)|written consent/gi,
-  dispute_resolution: /dispute resolution|arbitration|mediation|litigation|settle disputes/gi,
-  force_majeure: /force majeure|act of god|unforeseeable circumstances|beyond reasonable control/gi,
-  assignment: /assign(?:ment|ments|ed)?|transfer of rights|successors and assigns/gi,
-  warranty: /warrant(?:y|ies|ed)|representation(?:s)? and warranties|disclaims all warranties/gi,
-  severability: /severability|severable|invalid or unenforceable provision/gi,
-  non_compete: /non[- ]compete|non[- ]competition|restrictive covenant|competing business/gi,
-  intellectual_property: /intellectual property|work for hire|work made for hire|copyright|trademark|patent rights|ownership of inventions/gi,
-  payment: /payment terms|invoice|invoic(?:e|ing)|compensation|fees payable|late payment|overdue payment/gi,
-  data_protection: /data protection|personal data|personal information|privacy policy|data privacy|data processing/gi,
-  data_security: /data security|security breach|data breach|unauthorized access|security measures/gi,
-  renewal: /automatic renewal|auto[- ]renewal|renew(?:al|s|ed)|extension of this agreement/gi,
-  notice: /written notice|notice period|days['’]? notice|prior notice|notice of termination/gi,
-  audit_rights: /audit rights|right to audit|inspection rights|audit records/gi,
-  subcontracting: /subcontract(?:or|ing|ors)?|third[- ]party service provider|subcontracted services/gi,
+  confidentiality: /confidential(?:ity)?|non[- ]disclosure|proprietary information|trade secrets|confidential information|receiving party|disclosing party|nondisclosure/gi,
+  indemnification: /indemnif(?:y|ication|ies|ied)|hold harmless|defend and indemnify|indemnity|losses,? claims|third[- ]party claims/gi,
+  liability: /liability|limitation of liability|disclaimer of liability|liable for|damages cap|consequential damages|direct damages|aggregate liability|cap on damages/gi,
+  termination: /terminat(?:e|ion|es|ing)|cancellation|cancel this agreement|early termination|material breach|cure period|notice to terminate/gi,
+  governing_law: /governing law|choice of law|jurisdiction|venue|applicable law|courts of|laws of the state|exclusive jurisdiction/gi,
+  amendment: /amend(?:ment|ments|ed)?|modif(?:y|ication|ications)|written consent|variation of this agreement|changes to this agreement/gi,
+  dispute_resolution: /dispute resolution|arbitration|mediation|litigation|settle disputes|binding arbitration|alternative dispute|class action|jury trial/gi,
+  force_majeure: /force majeure|act of god|unforeseeable circumstances|beyond reasonable control|governmental action|natural disaster|inability to perform/gi,
+  assignment: /assign(?:ment|ments|ed)?|transfer of rights|successors and assigns|delegation of duties|assignment of this agreement/gi,
+  warranty: /warrant(?:y|ies|ed)|representation(?:s)? and warranties|disclaims all warranties|merchantability|fitness for a particular purpose|non-infringement/gi,
+  severability: /severability|severable|invalid or unenforceable provision|invalidity of any provision/gi,
+  non_compete: /non[- ]compete|non[- ]competition|restrictive covenant|competing business|non[- ]solicitation|non[- ]solicit/gi,
+  intellectual_property: /intellectual property|work for hire|work made for hire|copyright|trademark|patent rights|ownership of inventions|proprietary rights|license grant|moral rights/gi,
+  payment: /payment terms|invoice|invoic(?:e|ing)|compensation|fees payable|late payment|overdue payment|consideration|reimbursement|expenses|installment/gi,
+  data_protection: /data protection|personal data|personal information|privacy policy|data privacy|data processing|data controller|data processor|data subject|data processing agreement/gi,
+  data_security: /data security|security breach|data breach|unauthorized access|security measures|incident response|encryption|safeguards/gi,
+  renewal: /automatic renewal|auto[- ]renewal|renew(?:al|s|ed)|extension of this agreement|evergreen term|renewal term/gi,
+  notice: /written notice|notice period|days['’]? notice|prior notice|notice of termination|notice address|deemed received/gi,
+  audit_rights: /audit rights|right to audit|inspection rights|audit records|books and records|compliance audit/gi,
+  subcontracting: /subcontract(?:or|ing|ors)?|third[- ]party service provider|subcontracted services|subprocessor|sub-processing/gi,
+  survival: /surviv(?:e|es|al)|survival of obligations|following expiration|after termination/gi,
+  entire_agreement: /entire agreement|whole agreement|supersedes all prior|prior agreements|integration clause/gi,
+  waiver: /waiv(?:er|e|es)|failure to enforce|no waiver|waiver of rights/gi,
+  parties_and_scope: /parties hereto|hereinafter|effective date|scope of services|statement of work|deliverables|recitals/gi,
 };
+
+const LEGAL_SIGNAL_GROUPS = [
+  /\b(?:agreement|contract|covenant|deed|instrument|undertaking)\b/i,
+  /\b(?:party|parties|plaintiff|defendant|claimant|respondent|petitioner|appellant)\b/i,
+  /\b(?:shall|hereby|herein|thereof|whereas|pursuant to|notwithstanding)\b/i,
+  /\b(?:court|jurisdiction|statute|lawful|legal|legislation|affidavit|section \d+)\b/i,
+  /\b(?:indemnif|liabilit|terminat|confidential|arbitrat|warrant|breach|obligation|governing law)\w*/i,
+  /\b(?:lease|licence|license|employment|non-disclosure|terms and conditions|memorandum of understanding)\b/i,
+];
+
+export function isLikelyLegalDocument(text: string): boolean {
+  const normalized = text.slice(0, 100000);
+  if (normalized.trim().length < 40) return false;
+  return LEGAL_SIGNAL_GROUPS.reduce((hits, pattern) => hits + Number(pattern.test(normalized)), 0) >= 2;
+}
 
 
 const RISK_PATTERNS: {
@@ -79,6 +98,30 @@ const RISK_PATTERNS: {
     pattern: /\bas is\b|without recourse|non-negotiable/gi,
     weight: -8,
     description: "As-is / non-negotiable terms",
+  },
+  {
+    type: "one_sided_indemnity",
+    pattern: /(?:only|solely) (?:the )?(?:contractor|customer|buyer|recipient|employee) (?:shall )?(?:indemnify|be liable)|indemnif(?:y|ication) (?:the other party|the company) for any and all/gi,
+    weight: -12,
+    description: "Potentially one-sided indemnity",
+  },
+  {
+    type: "immediate_termination",
+    pattern: /(?:may|can) terminate (?:this agreement )?(?:immediately|without cause|at any time) without (?:notice|liability)/gi,
+    weight: -10,
+    description: "Termination without notice or cause",
+  },
+  {
+    type: "broad_fee_shifting",
+    pattern: /(?:all|any) (?:legal|attorneys['’]?) fees (?:and costs )?(?:shall be|will be) paid by|prevailing party.*(?:fees|costs)/gi,
+    weight: -7,
+    description: "Legal fee shifting may increase dispute costs",
+  },
+  {
+    type: "broad_transfer_rights",
+    pattern: /may assign (?:this agreement|its rights) without (?:consent|notice)|assignable .* sole discretion/gi,
+    weight: -7,
+    description: "Broad assignment rights",
   },
 ];
 

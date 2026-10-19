@@ -14,14 +14,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScoreRing } from "@/components/score-ring";
 import {
-  askDocument,
   discoverAdditionalFindings,
+  lexaChat,
   refineSummary,
   reviewClauseCandidates,
   type AiFinding,
   type ClauseVerdict,
 } from "@/lib/legal/ai";
-import { analyzeText } from "@/lib/legal/analyzer";
+import { analyzeText, isLikelyLegalDocument } from "@/lib/legal/analyzer";
 import { extractFileText } from "@/lib/legal/extract";
 import { SAMPLE_NDA, SAMPLE_RISKY } from "@/lib/legal/samples";
 import type { AnalysisResult, Factor } from "@/lib/legal/types";
@@ -72,8 +72,10 @@ function toneForScore(n: number): "ok" | "warn" | "danger" {
 
 export function AnalyzePanel({
   onDocumentLoaded,
+  historyRequest = 0,
 }: {
   onDocumentLoaded?: (text: string, name: string) => void;
+  historyRequest?: number;
 } = {}) {
   const [text, setText] = useState("");
   const [fileName, setFileName] = useState("untitled.txt");
@@ -82,6 +84,7 @@ export function AnalyzePanel({
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"summary" | "clauses" | "entities" | "risks" | "chat">("summary");
   const [chat, setChat] = useState<ChatTurn[]>([]);
+  const [analysisChatThreadId, setAnalysisChatThreadId] = useState<string>();
   const [question, setQuestion] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [aiSummary, setAiSummary] = useState<string | null>(null);
@@ -94,6 +97,8 @@ export function AnalyzePanel({
   const [showHistory, setShowHistory] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [originalFile, setOriginalFile] = useState<File | null>(null);
+  const [legalConfirmation, setLegalConfirmation] = useState<boolean | null>(null);
+  const [savedCurrent, setSavedCurrent] = useState(false);
   const reviewCooldown = useAiCooldown();
   const sumCooldown = useAiCooldown();
 
@@ -124,18 +129,41 @@ export function AnalyzePanel({
     setError(null);
     setBusy(true);
     try {
+      if (legalConfirmation !== true) {
+        throw new Error("Confirm that this is a legal document before uploading.");
+      }
+      if (!/\.(pdf|docx|txt|md|png|jpe?g|webp|tiff?)$/i.test(file.name)) {
+        throw new Error("Upload a legal document as PDF, DOCX, TXT, JPG, PNG, or WebP.");
+      }
       const extracted = await extractFileText(file);
+      if (!isLikelyLegalDocument(extracted)) {
+        throw new Error("We could not find enough legal language in this file. Check the image is readable and upload a legal document.");
+      }
       setText(extracted);
       setFileName(file.name);
       setOriginalFile(file);
-      setResult(analyzeText(extracted, file.name));
+      const analysis = analyzeText(extracted, file.name);
+      setResult(analysis);
+      setSavedCurrent(false);
       onDocumentLoaded?.(extracted, file.name);
       setAiSummary(null);
       setChat([]);
+      setAnalysisChatThreadId(undefined);
       setVerdicts(null);
       setAiFindings(null);
       setReviewError(null);
       setTab("summary");
+      try {
+        const payload = file.size <= MAX_SAVED_FILE_BYTES ? await fileToPayload(file) : undefined;
+        await saveAnalysis(analysis, payload);
+        setSavedCurrent(true);
+        await refreshHistory();
+        if (file.size > MAX_SAVED_FILE_BYTES) {
+          setError("Analysis saved. This file is over 5 MB, so the extracted text and results were saved without the original file.");
+        }
+      } catch (saveError) {
+        setError(saveError instanceof Error ? saveError.message : "Analysis complete, but we could not save it to your history.");
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not read that file.");
     } finally {
@@ -145,13 +173,19 @@ export function AnalyzePanel({
 
   function runAnalysis(source: string, name: string) {
     setError(null);
+    if (!isLikelyLegalDocument(source)) {
+      setError("This workspace analyzes legal documents. Add legal text before starting an analysis.");
+      return;
+    }
     setOriginalFile(null);
     setFileName(name);
     setText(source);
     setResult(analyzeText(source, name));
+    setSavedCurrent(false);
     onDocumentLoaded?.(source, name);
     setAiSummary(null);
     setChat([]);
+    setAnalysisChatThreadId(undefined);
     setVerdicts(null);
     setAiFindings(null);
     setReviewError(null);
@@ -208,10 +242,19 @@ export function AnalyzePanel({
     if (!result || !question.trim()) return;
     const q = question.trim();
     setQuestion("");
-    setChat((c) => [...c, { role: "user", content: q }]);
+    const userMessage: ChatTurn = { role: "user", content: q };
+    setChat((c) => [...c, userMessage]);
     setChatBusy(true);
     try {
-      const res = await askDocument({ data: { question: q, documentText: result.cleanedText } });
+      const res = await lexaChat({
+        data: {
+          messages: [...chat, userMessage],
+          documentText: result.cleanedText,
+          documentName: result.fileName,
+          threadId: analysisChatThreadId,
+        },
+      });
+      if ("threadId" in res && res.threadId) setAnalysisChatThreadId(res.threadId);
       setChat((c) => [
         ...c,
         { role: "assistant", content: res.ok ? res.text : res.error },
@@ -253,6 +296,13 @@ export function AnalyzePanel({
     void refreshHistory();
   }, [refreshHistory]);
 
+  useEffect(() => {
+    if (historyRequest > 0) {
+      setShowHistory(true);
+      void refreshHistory();
+    }
+  }, [historyRequest, refreshHistory]);
+
   async function onSave() {
     if (!result) return;
     setSaveBusy(true);
@@ -265,6 +315,7 @@ export function AnalyzePanel({
         ? await fileToPayload(matchingFile)
         : undefined;
       await saveAnalysis(result, payload);
+      setSavedCurrent(true);
       await refreshHistory();
       if (matchingFile && matchingFile.size > MAX_SAVED_FILE_BYTES) {
         setError("Analysis saved. The original file exceeded 5 MB, so only its extracted text and results were saved.");
@@ -286,11 +337,13 @@ export function AnalyzePanel({
     if (loaded) {
       setOriginalFile(null);
       setResult(loaded);
+      setSavedCurrent(true);
       setText(loaded.cleanedText);
       setFileName(loaded.fileName);
       onDocumentLoaded?.(loaded.cleanedText, loaded.fileName);
       setAiSummary(null);
       setChat([]);
+      setAnalysisChatThreadId(undefined);
       setVerdicts(null);
       setAiFindings(null);
       setReviewError(null);
@@ -338,23 +391,41 @@ export function AnalyzePanel({
             <h2 className="mt-1 font-display text-3xl leading-none text-fg">Document</h2>
           </div>
           <img
-            src="/aegis-logo.png?v=2"
-            alt="Female advocate AI logo"
-            className="size-9 rounded-full bg-white object-contain p-0.5"
+            src="/aegis-logo.png"
+            alt="Aegis advocate emblem"
+            className="brand-mark size-9"
           />
         </div>
-        <p className="mt-3 text-sm text-muted">
-          Upload a PDF, DOCX, or TXT. Analysis runs on-device. Chat uses a private server call and never stores the file.
+        <p className="mt-3 text-sm leading-6 text-muted">
+          Add a contract, court filing, or other legal record. Scans and photos are read with OCR, then your analysis is saved to your account history.
         </p>
 
-        <label className="mt-5 flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border-strong bg-elevated px-4 py-8 text-center transition-colors hover:border-accent">
+        <fieldset className="mt-5 rounded-xl border border-border bg-bg p-4">
+          <legend className="px-1 text-xs font-semibold">Is this a legal document?</legend>
+          <div className="mt-2 grid grid-cols-2 gap-2" role="radiogroup" aria-label="Confirm legal document">
+            {[{ value: true, label: "Yes, it is legal" }, { value: false, label: "No" }].map(({ value, label }) => (
+              <button key={label} type="button" role="radio" aria-checked={legalConfirmation === value} onClick={() => setLegalConfirmation(value)} className={cn("min-h-10 rounded-lg border px-3 text-xs font-medium transition", legalConfirmation === value ? "border-accent bg-accent/10 text-fg" : "border-border bg-surface text-muted hover:border-border-strong")}>{label}</button>
+            ))}
+          </div>
+          <p className={cn("mt-2 text-[11px] leading-5", legalConfirmation === false ? "text-danger" : "text-muted")}>{legalConfirmation === false ? "This workspace accepts legal documents only. Choose Yes when you have a legal record to review." : "We also check for legal language after extraction to catch unrelated files."}</p>
+        </fieldset>
+
+        <label
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            const dropped = event.dataTransfer.files[0];
+            if (dropped) void onFile(dropped);
+          }}
+          className={cn("mt-4 flex min-h-36 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border-strong bg-elevated px-4 py-8 text-center transition-colors", legalConfirmation === true ? "cursor-pointer hover:border-accent" : "cursor-not-allowed opacity-65")}
+        >
           {busy ? (
             <>
               <img
-                src="/aegis-logo.png?v=2"
+                src="/aegis-logo.png"
                 alt=""
                 aria-hidden="true"
-                className="aegis-logo-loading size-16 rounded-full bg-white object-contain p-1"
+                className="aegis-logo-loading brand-mark size-16"
               />
               <span className="mt-3 text-sm text-fg">Reading your document…</span>
               <span className="mt-1 text-xs text-subtle">Aegis is preparing the analysis</span>
@@ -362,15 +433,15 @@ export function AnalyzePanel({
           ) : (
             <>
               <Upload className="size-5 text-accent" />
-              <span className="mt-2 text-sm text-fg">Drop a contract or browse</span>
-              <span className="mt-1 text-xs text-subtle">PDF · DOCX · TXT · MD</span>
+              <span className="mt-2 text-sm text-fg">Drop a legal file here or browse</span>
+              <span className="mt-1 text-xs text-subtle">PDF · DOCX · TXT · JPG · PNG · WebP</span>
             </>
           )}
           <input
             type="file"
-            accept=".pdf,.docx,.txt,.md,text/plain"
+            accept=".pdf,.docx,.txt,.md,.jpg,.jpeg,.png,.webp,.tif,.tiff,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,image/*"
             className="sr-only"
-            disabled={busy}
+            disabled={busy || legalConfirmation !== true}
             onChange={(e) => {
               const f = e.target.files?.[0];
               if (f) void onFile(f);
@@ -499,13 +570,14 @@ export function AnalyzePanel({
                     </div>
                   ) : null}
                 </div>
-                <Button variant="outline" size="sm" onClick={() => void onSave()} disabled={saveBusy}>
+                <Button variant="outline" size="sm" onClick={() => void onSave()} disabled={saveBusy || savedCurrent}>
                   {saveBusy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-                  Save
+                  {savedCurrent ? "Saved" : "Save"}
                 </Button>
                 <ScoreRing value={result.signing.percentage} />
               </div>
             </div>
+            <p className="mt-3 text-right text-[10px] leading-4 text-subtle">Screening estimate from detected terms and missing clauses; verify flagged language before acting.</p>
 
             <div className="mt-6 flex flex-wrap gap-1 rounded-[var(--radius-md)] bg-elevated p-1">
               {(
