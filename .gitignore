@@ -1,21 +1,21 @@
-.env 
-.env 
-node_modules/ 
-.env 
-dist/ 
-node_modules/ 
-.env 
-key.env 
-.vercel/ 
-dist/ 
-.grok/ 
-node_modules/ 
-.env 
-key.env 
-.vercel/ 
-dist/ 
-.grok/ 
-node_modules/ 
-.env 
-grok-workspace/ 
+# secrets
+.env
+.env.*
+!.env.example
+key.env
+
+# deps / build
+node_modules/
+dist/
+.output/
+.nitro/
+.vercel/
+.tanstack/
+
+# tooling / local
+.grok/
 .neon
+grok-workspace/
+.node_modules.lock
+*.log
+*.zip

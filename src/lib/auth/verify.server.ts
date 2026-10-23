@@ -83,10 +83,12 @@ export async function getSessionUser(
  */
 export async function requireUserId(bearerToken?: string): Promise<string> {
   if (!authConfigured && !gateIdentityEnabled()) {
-    if (databaseConfigured) {
+    const productionRuntime =
+      process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
+    if (databaseConfigured || productionRuntime) {
       throw new Error(
-        "Auth is disabled (VITE_AUTH_ENABLED=false) but DATABASE_URL is set — " +
-          "refusing to fall back to the shared dev user against a real database.",
+        "Auth is disabled (VITE_AUTH_ENABLED=false) in a production runtime or with DATABASE_URL set — " +
+          "refusing to fall back to the shared dev user.",
       );
     }
     return DEV_USER_ID;

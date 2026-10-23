@@ -12,6 +12,16 @@ import { grokPwaPlugin } from "./scripts/grok-pwa-plugin.mjs";
 import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
 import { isMigrationFile } from "./scripts/migration-plan.mjs";
 
+// Vite only exposes VITE_-prefixed vars from .env to import.meta.env; server
+// functions read secrets (e.g. OPENROUTER_API_KEY) from process.env. Load .env
+// here so `vite dev` / `vite preview` work even when not started via
+// scripts/with-app-env.mjs. Real shell/deployment variables keep precedence.
+try {
+  process.loadEnvFile(join(process.cwd(), ".env"));
+} catch (error) {
+  if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+}
+
 /** The files `src/lib/db.ts` globs — same directory, same non-recursive scope. */
 function hasGlobbedMigrations(root: string): boolean {
   try {

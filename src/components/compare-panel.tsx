@@ -1,26 +1,67 @@
 import { useState } from "react";
-import { GitCompareArrows, Loader2, Sparkles } from "lucide-react";
+import { FileText, GitCompareArrows, Loader2, Sparkles, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScoreRing } from "@/components/score-ring";
 import { analyzeText, compareAnalyses } from "@/lib/legal/analyzer";
+import { extractFileTextWithWarnings } from "@/lib/legal/extract";
 import { SAMPLE_NDA, SAMPLE_RISKY } from "@/lib/legal/samples";
 import { compareWithAi } from "@/lib/legal/ai";
 import { useAiCooldown } from "@/lib/hooks/ai-cooldown";
 import type { ComparisonResult } from "@/lib/legal/types";
 
 export function ComparePanel() {
-  const [left, setLeft] = useState(SAMPLE_NDA);
-  const [right, setRight] = useState(SAMPLE_RISKY);
+  const [left, setLeft] = useState("");
+  const [right, setRight] = useState("");
+  const [leftName, setLeftName] = useState("");
+  const [rightName, setRightName] = useState("");
+  const [leftWarnings, setLeftWarnings] = useState<string[]>([]);
+  const [rightWarnings, setRightWarnings] = useState<string[]>([]);
+  const [pasteMode, setPasteMode] = useState(false);
+  const [extracting, setExtracting] = useState<"A" | "B" | null>(null);
+  const [inputError, setInputError] = useState<string | null>(null);
   const [result, setResult] = useState<ComparisonResult | null>(null);
   const [aiExplanation, setAiExplanation] = useState<string | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const aiCooldown = useAiCooldown();
 
+  async function attachFile(file: File, side: "A" | "B") {
+    setInputError(null);
+    if (side === "A") setLeftWarnings([]);
+    else setRightWarnings([]);
+    setExtracting(side);
+    try {
+      const extraction = await extractFileTextWithWarnings(file);
+      const extracted = extraction.text;
+      if (!extracted.trim()) throw new Error(`No readable text was found in ${file.name}.`);
+      if (side === "A") {
+        setLeft(extracted);
+        setLeftName(file.name);
+        setLeftWarnings(extraction.warnings);
+      } else {
+        setRight(extracted);
+        setRightName(file.name);
+        setRightWarnings(extraction.warnings);
+      }
+      setResult(null);
+      setAiExplanation(null);
+      setAiError(null);
+    } catch (cause) {
+      setInputError(cause instanceof Error ? cause.message : "Could not read that file. Try another document.");
+    } finally {
+      setExtracting(null);
+    }
+  }
+
   function run() {
-    const a = analyzeText(left, "Document A");
-    const b = analyzeText(right, "Document B");
+    if (!left.trim() || !right.trim()) {
+      setInputError("Attach or enter text for both documents before comparing.");
+      return;
+    }
+    setInputError(null);
+    const a = analyzeText(left, leftName || "Document A");
+    const b = analyzeText(right, rightName || "Document B");
     const diff = compareAnalyses(a, b);
     setResult({ doc1: a, doc2: b, ...diff });
     setAiExplanation(null);
@@ -53,30 +94,125 @@ export function ComparePanel() {
     }
   }
 
+  function loadExampleComparison() {
+    setLeft(SAMPLE_NDA);
+    setRight(SAMPLE_RISKY);
+    setLeftName("Example mutual NDA");
+    setRightName("Example one-sided services agreement");
+    setLeftWarnings([]);
+    setRightWarnings([]);
+    setPasteMode(true);
+    setResult(null);
+    setAiExplanation(null);
+    setAiError(null);
+    setInputError(null);
+  }
+
   return (
     <div className="space-y-6">
       <div className="grid gap-4 lg:grid-cols-2">
-        <label className="block rounded-[var(--radius-xl)] border border-border bg-surface p-5">
-          <span className="text-[11px] uppercase tracking-[0.16em] text-subtle">Document A</span>
-          <textarea
-            value={left}
-            onChange={(e) => setLeft(e.target.value)}
-            rows={12}
-            className="mt-3 w-full resize-y rounded-[var(--radius-md)] border border-border bg-bg p-3 font-mono text-xs text-fg outline-none"
-          />
-        </label>
-        <label className="block rounded-[var(--radius-xl)] border border-border bg-surface p-5">
-          <span className="text-[11px] uppercase tracking-[0.16em] text-subtle">Document B</span>
-          <textarea
-            value={right}
-            onChange={(e) => setRight(e.target.value)}
-            rows={12}
-            className="mt-3 w-full resize-y rounded-[var(--radius-md)] border border-border bg-bg p-3 font-mono text-xs text-fg outline-none"
-          />
-        </label>
+        {(["A", "B"] as const).map((side) => {
+          const name = side === "A" ? leftName : rightName;
+          const value = side === "A" ? left : right;
+          const setValue = side === "A" ? setLeft : setRight;
+          const warnings = side === "A" ? leftWarnings : rightWarnings;
+          return (
+            <section key={side} className="rounded-[var(--radius-xl)] border border-border bg-surface p-5">
+              <p className="text-[11px] uppercase tracking-[0.16em] text-subtle">Document {side}</p>
+              {pasteMode ? (
+                <textarea
+                  aria-label={`Document ${side} text`}
+                  value={value}
+                  onChange={(event) => {
+                    setValue(event.target.value);
+                    if (side === "A") setLeftName("");
+                    else setRightName("");
+                    if (side === "A") setLeftWarnings([]);
+                    else setRightWarnings([]);
+                    setResult(null);
+                    setInputError(null);
+                  }}
+                  rows={12}
+                  placeholder="Paste the document text here…"
+                  className="mt-3 w-full resize-y rounded-[var(--radius-md)] border border-border bg-bg p-3 font-mono text-xs text-fg outline-none"
+                />
+              ) : (
+                <label className="mt-3 flex min-h-40 cursor-pointer flex-col items-center justify-center rounded-[var(--radius-md)] border border-dashed border-border bg-bg px-4 py-6 text-center transition hover:border-accent">
+                  <input
+                    type="file"
+                    accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.tif,.tiff"
+                    className="sr-only"
+                    aria-label={`Attach document ${side}`}
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0];
+                      event.currentTarget.value = "";
+                      if (file) void attachFile(file, side);
+                    }}
+                  />
+                  {extracting === side ? (
+                    <Loader2 className="size-6 animate-spin text-accent" />
+                  ) : name ? (
+                    <FileText className="size-6 text-accent" />
+                  ) : (
+                    <Upload className="size-6 text-accent" />
+                  )}
+                  <span className="mt-3 max-w-full truncate text-sm font-medium text-fg">
+                    {extracting === side ? "Reading attachment…" : name || "Choose a document"}
+                  </span>
+                  <span className="mt-1 text-xs text-muted">
+                    {name ? `${value.length.toLocaleString()} characters extracted · Choose another to replace` : "PDF, DOCX, TXT, Markdown, or image"}
+                  </span>
+                </label>
+              )}
+              {warnings.length > 0 && (
+                <div role="status" className="mt-3 rounded-lg border border-warn/40 bg-warn/10 p-3 text-xs leading-5 text-fg">
+                  <p className="font-semibold text-warn">Check extraction completeness</p>
+                  {warnings.map((warning) => <p key={warning} className="mt-1">{warning}</p>)}
+                </div>
+              )}
+            </section>
+          );
+        })}
       </div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-muted">Attachments are read in your browser to extract text for comparison.</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={loadExampleComparison}
+            className="min-h-10 rounded-lg px-3 text-sm font-medium text-accent transition hover:bg-accent-soft"
+          >
+            Try sample comparison
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setPasteMode((current) => {
+                if (current) {
+                  setLeft("");
+                  setRight("");
+                  setLeftName("");
+                  setRightName("");
+                  setLeftWarnings([]);
+                  setRightWarnings([]);
+                }
+                return !current;
+              });
+              setResult(null);
+              setInputError(null);
+            }}
+            className="min-h-10 rounded-lg px-3 text-sm font-medium text-accent transition hover:bg-accent-soft"
+          >
+            {pasteMode ? "Use attachments instead" : "Paste text instead"}
+          </button>
+        </div>
+      </div>
+      <p className="text-[11px] leading-5 text-muted">
+        If you choose AI Explain Differences, both documents’ extracted text are sent to the configured AI provider.
+      </p>
+      {inputError ? <p role="alert" className="text-sm text-danger">{inputError}</p> : null}
       <div className="flex flex-wrap gap-2">
-        <Button onClick={run} className="w-full sm:w-auto">
+        <Button onClick={run} disabled={extracting !== null || !left.trim() || !right.trim()} className="w-full sm:w-auto">
           <GitCompareArrows className="size-4" />
           Compare
         </Button>

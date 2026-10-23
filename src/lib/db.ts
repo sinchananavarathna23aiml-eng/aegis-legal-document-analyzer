@@ -107,11 +107,15 @@ function createNeonSql(): Promise<Sql> {
 
 async function createPgliteSql(): Promise<Sql> {
   // Embedded Postgres, imported on demand so it never loads on the Neon path.
-  // One in-memory instance per process, shared across HMR module instances, so
-  // data survives source edits (it resets on dev-server restart).
+  // One local instance shared across HMR module instances. In development the
+  // filesystem data directory also survives dev-server and terminal restarts.
   globalRef.__pgliteInstance__ ??= (async () => {
     const { PGlite } = await import("@electric-sql/pglite");
-    const pg = new PGlite({
+    // Local development needs the same durability users expect from Neon so
+    // accounts and legal history survive closing/reopening the terminal. Keep
+    // the filesystem-backed mode out of Vercel, where runtime disk is ephemeral.
+    const localDataDir = process.env.VERCEL ? undefined : ".grok/aegis-postgres";
+    const pg = new PGlite(localDataDir, {
       parsers: {
         [OID_INT8]: Number,
         [OID_DATE]: identity,
@@ -212,8 +216,9 @@ export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite
 /**
  * Finish DB bootstrap before the server handles traffic.
  *
- * - **PGLite** (preview / no `DATABASE_URL`): open the in-memory DB and apply
- *   `migrations/*.sql`. Idempotent — concurrent callers share one promise.
+ * - **PGLite** (local / preview without `DATABASE_URL`): open the configured
+ *   local data directory and apply `migrations/*.sql`. Idempotent — concurrent
+ *   callers share one promise.
  * - **Neon**: no-op (pool is created lazily on first query).
  *
  * Vite `configureServer` awaits this at dev startup; production imports of this
